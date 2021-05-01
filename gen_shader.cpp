@@ -179,15 +179,27 @@ struct ProgramState
 	}
 	
 	std::vector<StringStackBuffer<32>> ScratchExpressionList;
+
+	void BeginScope()
+	{
+		VarScopeCountStack.push_back(VarsInScope.size());
+	}
+
+	void EndScope()
+	{
+		VarsInScope.resize(VarScopeCountStack.back());
+		VarScopeCountStack.pop_back();
+		assert(VarScopeCountStack.size() == 0);
+	}
 };
 
 
 void InitProgramState(ProgramState* PS)
 {
 	{
-		TypeInfo Info1 = {"float", {}};
+		TypeInfo Info1 = {"bool", {}};
 		TypeInfo Info2 = {"int", {}};
-		TypeInfo Info3 = {"bool", {}};
+		TypeInfo Info3 = {"float", {}};
 		// Don't both with fields I guess? idk, or maybe do them later
 		TypeInfo Info4 = {"vec2", {}};
 		TypeInfo Info5 = {"vec3", {}};
@@ -285,16 +297,27 @@ void InitProgramState(ProgramState* PS)
 			int32 NumComponents = OutputType - BT_Float + 1;
 			uint32 NumIters = 1U << (2 * NumComponents);
 			char Buff[16] = {};
+			static const char CompMapping[4] = { 'x', 'y', 'z', 'w' };
 			for (uint32 i = 0; i < NumIters; i++)
 			{
+				bool bInRange = true;
 				uint32 Scratch = i;
 				for (int32 c = 0; c < NumComponents; c++)
 				{
-					Buff[c] = 'w' + Scratch & 0x03;
+					if ((Scratch & 0x03) >= NumComponents)
+					{
+						bInRange = false;
+						break;
+					}
+
+					Buff[c] = CompMapping[Scratch & 0x03];
 					Scratch >>= 2;
 				}
 
-				AddBuiltinFieldAccess(InputType, OutputType, Buff);
+				if (bInRange)
+				{
+					AddBuiltinFieldAccess(InputType, OutputType, Buff);
+				}
 			}
 		};
 
@@ -487,14 +510,42 @@ void GenerateLiteralExpression(ProgramState* PS, TypeID DstType)
 	case BT_Float: {
 		PS->ScratchExpressionList.push_back(StringStackBuffer<32>("%f", PS->GetFloatInRange(-2.0f, 2.0f)));
 	} break;
-	case BT_Vec2: {
-		PS->ScratchExpressionList.push_back(StringStackBuffer<32>("vec2(%f, %f)", PS->GetFloatInRange(-2.0f, 2.0f), PS->GetFloatInRange(-2.0f, 2.0f)));
+	case BT_Vec2:
+	{
+		PS->ScratchExpressionList.push_back(StringStackBuffer<32>("vec2("));
+		for (int32 i = 0; i < 2; i++)
+		{
+			if (i > 0)
+			{
+				PS->ScratchExpressionList.push_back(StringStackBuffer<32>(", "));
+			}
+			PS->ScratchExpressionList.push_back(StringStackBuffer<32>("%f", PS->GetFloatInRange(-2.0f, 2.0f)));
+		}
+		PS->ScratchExpressionList.push_back(StringStackBuffer<32>(")"));
 	} break;
 	case BT_Vec3: {
-		PS->ScratchExpressionList.push_back(StringStackBuffer<32>("vec3(%f, %f, %f)", PS->GetFloatInRange(-2.0f, 2.0f), PS->GetFloatInRange(-2.0f, 2.0f), PS->GetFloatInRange(-2.0f, 2.0f)));
+		PS->ScratchExpressionList.push_back(StringStackBuffer<32>("vec3("));
+		for (int32 i = 0; i < 3; i++)
+		{
+			if (i > 0)
+			{
+				PS->ScratchExpressionList.push_back(StringStackBuffer<32>(", "));
+			}
+			PS->ScratchExpressionList.push_back(StringStackBuffer<32>("%f", PS->GetFloatInRange(-2.0f, 2.0f)));
+		}
+		PS->ScratchExpressionList.push_back(StringStackBuffer<32>(")"));
 	} break;
 	case BT_Vec4: {
-		PS->ScratchExpressionList.push_back(StringStackBuffer<32>("vec3(%f, %f, %f, %f)", PS->GetFloatInRange(-2.0f, 2.0f), PS->GetFloatInRange(-2.0f, 2.0f), PS->GetFloatInRange(-2.0f, 2.0f), PS->GetFloatInRange(-2.0f, 2.0f)));
+		PS->ScratchExpressionList.push_back(StringStackBuffer<32>("vec4("));
+		for (int32 i = 0; i < 4; i++)
+		{
+			if (i > 0)
+			{
+				PS->ScratchExpressionList.push_back(StringStackBuffer<32>(", "));
+			}
+			PS->ScratchExpressionList.push_back(StringStackBuffer<32>("%f", PS->GetFloatInRange(-2.0f, 2.0f)));
+		}
+		PS->ScratchExpressionList.push_back(StringStackBuffer<32>(")"));
 	} break;
 	default: {
 		assert(false && "bad enum");
@@ -562,11 +613,16 @@ bool GenerateExpression(ProgramState* PS, TypeID DstType, int ExprStackDepth = 0
 				assert(CurrentTransform.NumSrcTypes == 1);
 
 				Success = GenerateExpression(PS, CurrentTransform.SrcTypes[0], ExprStackDepth + 1);
+				if (Success)
+				{
+					PS->ScratchExpressionList.push_back(StringStackBuffer<32>("."));
+					PS->ScratchExpressionList.push_back(CurrentTransform.Name);
+				}
 			}
 			else if (CurrentTransform.TransformType == DTT_Func)
 			{
 				assert(CurrentTransform.NumSrcTypes >= 1);
-				PS->ScratchExpressionList.push_back(StringStackBuffer<32>("%s", CurrentTransform.Name));
+				PS->ScratchExpressionList.push_back(CurrentTransform.Name);
 				PS->ScratchExpressionList.push_back(StringStackBuffer<32>("("));
 
 				for (int32 i = 0; i < CurrentTransform.NumSrcTypes; i++)
@@ -595,7 +651,7 @@ bool GenerateExpression(ProgramState* PS, TypeID DstType, int ExprStackDepth = 0
 
 				if (Success)
 				{
-					PS->ScratchExpressionList.push_back(StringStackBuffer<32>("%s", CurrentTransform.Name));
+					PS->ScratchExpressionList.push_back(CurrentTransform.Name);
 
 					Success &= GenerateExpression(PS, CurrentTransform.SrcTypes[1], ExprStackDepth + 1);
 
@@ -679,7 +735,7 @@ void GenerateStatement(ProgramState* PS, SourceBuffer* SrcBuff)
 
 	const float Decider = PS->GetFloat01();
 
-	if (PS->VarScopeCountStack.front() < PS->VarsInScope.size() && Decider < 0.6f)
+	if (PS->VarScopeCountStack.front() < PS->VarsInScope.size() && Decider < 0.4f)
 	{
 		int32 VarAssignIndex = PS->GetIntInRange(PS->VarScopeCountStack.front(), PS->VarsInScope.size() - 1);
 		GenerateAssignmentStatement(PS, SrcBuff, PS->VarsInScope[VarAssignIndex]);
@@ -715,6 +771,8 @@ void GenerateReturnStatement(ProgramState* PS, SourceBuffer* SrcBuff, TypeID Ret
 	RetValInfo.Name.Append("_retval");
 	RetValInfo.Type = RetType;
 
+	SrcBuff->AppendFormat("\t%s %s;\n", PS->ProgramTypes[RetType].Name.buffer, RetValInfo.Name.buffer);
+
 	GenerateAssignmentStatement(PS, SrcBuff, RetValInfo);
 
 	SrcBuff->AppendFormat("\treturn %s;\n", RetValInfo.Name.buffer);
@@ -728,14 +786,14 @@ void GenerateUserDefinedFuncs(ProgramState* PS, SourceBuffer* SrcBuff)
 	int32 NumUserFuncs = PS->GetIntInRange(0, 5);
 	for (int32 i = 0; i < NumUserFuncs; i++)
 	{
-		PS->VarScopeCountStack.push_back(PS->VarsInScope.size());
+		PS->BeginScope();
 
 		TypeID RetType = PS->GetIntInRange(0, PS->ProgramTypes.size() - 1);
 		const auto& RetTypeInfo = PS->ProgramTypes[RetType];
 
 		int32 NumParams = PS->GetIntInRange(1, 4);
 
-		SrcBuff->AppendFormat("%s user_func_%d(", RetTypeInfo.Name.buffer);
+		SrcBuff->AppendFormat("%s user_func_%d(", RetTypeInfo.Name.buffer, i);
 
 		for (int32 p = 0; p < NumParams; p++)
 		{
@@ -760,17 +818,27 @@ void GenerateUserDefinedFuncs(ProgramState* PS, SourceBuffer* SrcBuff)
 
 		SrcBuff->AppendFormat("}\n\n");
 
-		PS->VarsInScope.resize(PS->VarScopeCountStack.back());
-		PS->VarScopeCountStack.pop_back();
-		assert(PS->VarScopeCountStack.size() == 0);
+		PS->EndScope();
 	}
 }
 
 void GenerateMainFunction(ProgramState* PS, SourceBuffer* SrcBuff)
 {
-	int32 CurrentNumVars = PS->VarsInScope.size();
+	PS->BeginScope();
 
-	PS->VarsInScope.resize(CurrentNumVars);
+	SrcBuff->Append("void main() {\n");
+
+	GenerateFunctionBody(PS, SrcBuff);
+
+	// TODO: Non-Frag shaders
+	VariableInfo FragColourInfo;
+	FragColourInfo.Name.Append("gl_FragColor");
+	FragColourInfo.Type = BT_Vec4;
+	GenerateAssignmentStatement(PS, SrcBuff, FragColourInfo);
+
+	SrcBuff->Append("}\n\n");
+
+	PS->EndScope();
 }
 
 void GenerateShaderSource(ProgramState* PS, SourceBuffer* SrcBuff, ShaderType InShaderType)
@@ -799,7 +867,7 @@ int main(int argc, char** argv)
 	printf("Sup.\n");
 
 	ProgramState PS;
-	PS.SetSeed(0x111);
+	PS.SetSeed(0x112);
 
 	// Heap allocation just cause it's pretty big
 	// Also: typedef as ctor name isn't portable afaik
