@@ -392,7 +392,8 @@ void InitProgramState(ProgramState* PS)
 
 void GenerateUserDefinedStructs(ProgramState* PS, SourceBuffer* SrcBuff)
 {
-	int32 NumStructs = PS->GetIntInRange(0, 4);
+	// TODO: Should be 0 after testing
+	int32 NumStructs = PS->GetIntInRange(2, 5);
 
 	for (int32 i = 0; i < NumStructs; i++)
 	{
@@ -480,21 +481,32 @@ void GenerateGlobalVariables(ProgramState* PS, SourceBuffer* SrcBuff, ShaderType
 		assert(false && "TODO");
 	}
 	
-	auto DeclareNumGlobalVars = [&](const char* DeclType, int NumVars)
+	auto DeclareNumGlobalVars = [&](const char* DeclType, int NumVars, bool bAllowBoolAndInt)
 	{
 		for (int32 i = 0; i < NumVars; i++)
 		{
 			PS->VarsInScope.emplace_back();
 			auto& Var = PS->VarsInScope.back();
 			Var.Type = (TypeID)PS->GetIntInRange(0, (int32)PS->ProgramTypes.size() - 1);
+
+			if (!bAllowBoolAndInt)
+			{
+				// If we disallow bools and ints on this declaration class,
+				// keep trying random types until one passes
+				while (Var.Type == BT_Bool || Var.Type == BT_Int)
+				{
+					Var.Type = (TypeID)PS->GetIntInRange(0, (int32)PS->ProgramTypes.size() - 1);
+				}
+			}
+
 			Var.Name.AppendFormat("glob_%4s_%d", DeclType, i);
 			SrcBuff->AppendFormat("%s %s %s;\n", DeclType, PS->ProgramTypes[Var.Type].Name.buffer, Var.Name.buffer);
 		}
 	};
 	
-	DeclareNumGlobalVars("attribute", NumAttributes);
-	DeclareNumGlobalVars("varying", NumVarying);
-	DeclareNumGlobalVars("uniform", NumUniforms);
+	DeclareNumGlobalVars("attribute", NumAttributes, false);
+	DeclareNumGlobalVars("varying", NumVarying, false);
+	DeclareNumGlobalVars("uniform", NumUniforms, true);
 }
 
 void GenerateLiteralExpression(ProgramState* PS, TypeID DstType)
@@ -505,7 +517,16 @@ void GenerateLiteralExpression(ProgramState* PS, TypeID DstType)
 		PS->ScratchExpressionList.push_back(StringStackBuffer<32>("%s", (PS->GetIntInRange(0,1) != 0) ? "true" : "false"));
 	} break;
 	case BT_Int: {
-		PS->ScratchExpressionList.push_back(StringStackBuffer<32>("%d", PS->GetIntInRange(-20, 30)));
+		int32 LitValue = PS->GetIntInRange(-20, 30);
+		if (LitValue < 0)
+		{
+			// Add a space to avoid something like "10--5" if we are subtracting a negative literal
+			PS->ScratchExpressionList.push_back(StringStackBuffer<32>(" %d", LitValue));
+		}
+		else
+		{
+			PS->ScratchExpressionList.push_back(StringStackBuffer<32>("%d", LitValue));
+		}
 	} break;
 	case BT_Float: {
 		PS->ScratchExpressionList.push_back(StringStackBuffer<32>("%f", PS->GetFloatInRange(-2.0f, 2.0f)));
@@ -722,7 +743,7 @@ void GenerateAssignmentStatement(ProgramState* PS, SourceBuffer* SrcBuff, const 
 		{
 			VariableInfo VarFieldInfo;
 			VarFieldInfo.Type = Field.Type;
-			VarFieldInfo.Name.AppendFormat("%s.%s", VarInfo.Name, Field.Name);
+			VarFieldInfo.Name.AppendFormat("%s.%s", VarInfo.Name.buffer, Field.Name.buffer);
 			GenerateAssignmentStatement(PS, SrcBuff, VarFieldInfo);
 		}
 	}
@@ -783,7 +804,8 @@ void GenerateUserDefinedFuncs(ProgramState* PS, SourceBuffer* SrcBuff)
 	// TODO: Remember to add the data transformation as well
 	// and IndexProgramDataTransformations()
 
-	int32 NumUserFuncs = PS->GetIntInRange(0, 5);
+	// TODO: Should be 0 after testing
+	int32 NumUserFuncs = PS->GetIntInRange(3, 5);
 	for (int32 i = 0; i < NumUserFuncs; i++)
 	{
 		PS->BeginScope();
@@ -845,6 +867,9 @@ void GenerateShaderSource(ProgramState* PS, SourceBuffer* SrcBuff, ShaderType In
 {
 	// TODO: Init program outside generation loop once, and restore to it?
 	InitProgramState(PS);
+
+	// TODO: Diff. precision levels
+	SrcBuff->Append("precision highp float;\n\n");
 
 	GenerateUserDefinedStructs(PS, SrcBuff);
 	IndexProgramDataTransformations(PS);
