@@ -149,6 +149,8 @@ struct ProgramState
 	
 	// 0th element is the index of the first non-global variable in this context
 	std::vector<int32> VarScopeCountStack;
+
+	int32 CurrentIfStmtDepth = 0;
 	
 	// TODO: For vert shaders
 	//std::vector<VariableInfo> OutVars;
@@ -189,7 +191,6 @@ struct ProgramState
 	{
 		VarsInScope.resize(VarScopeCountStack.back());
 		VarScopeCountStack.pop_back();
-		assert(VarScopeCountStack.size() == 0);
 	}
 };
 
@@ -575,12 +576,12 @@ void GenerateLiteralExpression(ProgramState* PS, TypeID DstType)
 }
 
 // TODO: How to deal with knowing which variables, and which fields have been init'd
-bool GenerateExpression(ProgramState* PS, TypeID DstType, int ExprStackDepth = 0)
+bool GenerateExpression(ProgramState* PS, TypeID DstType, int ExprStackDepth = 0, bool bForceNoRecur = false)
 {
 	const float Decider = PS->GetFloat01();
 
 	// Basically, start out allowing recursion half the time, and then after a certain depth only recur 10% of the time to finish up in a reasonable time
-	if (Decider < 0.5f || (Decider < 0.9f && ExprStackDepth > 3))
+	if (Decider < 0.3f || (Decider < 0.9f && ExprStackDepth > 3) || bForceNoRecur)
 	{
 		// Read a variable of that type if it exists
 		// If it doesn't exist and it's a builtin type, issue a literal
@@ -714,7 +715,9 @@ void GenerateAssignmentStatement(ProgramState* PS, SourceBuffer* SrcBuff, const 
 	const int32 NumRetries = 4;
 	for (int32 i = 0; i < NumRetries; i++)
 	{
-		Success = GenerateExpression(PS, VarInfo.Type);
+		// If it's our last chance to produce a builtin, force it to not recur so we know we'll get something
+		bool bForceNoRecur = (i == (NumRetries - 1)) && (VarInfo.Type < BT_Count);
+		Success = GenerateExpression(PS, VarInfo.Type, 0, bForceNoRecur);
 		if (Success)
 		{
 			break;
@@ -776,13 +779,63 @@ void GenerateStatement(ProgramState* PS, SourceBuffer* SrcBuff)
 
 }
 
-void GenerateFunctionBody(ProgramState* PS, SourceBuffer* SrcBuff)
+void GenerateBeginIfStatement(ProgramState* PS, SourceBuffer* SrcBuff)
 {
-	int32 NumStatements = PS->GetIntInRange(1, 10);
+	SrcBuff->Append("\tif (");
+	
+	bool Success = false;
+	const int32 NumRetries = 4;
+	for (int32 i = 0; i < NumRetries; i++)
+	{
+		// If it's our last chance to produce a builtin, force it to not recur so we know we'll get something
+		bool bForceNoRecur = (i == (NumRetries - 1));
+		Success = GenerateExpression(PS, BT_Bool, 0, bForceNoRecur);
+		if (Success)
+		{
+			break;
+		}
+	}
 
+	assert(Success && "if statement bool not made");
+
+	WriteOutExpressionStackAsSourceString(PS, SrcBuff);
+	PS->ScratchExpressionList.clear();
+	SrcBuff->Append(") {\n");
+
+	PS->BeginScope();
+	PS->CurrentIfStmtDepth++;
+}
+
+void GenerateEndIfStatement(ProgramState* PS, SourceBuffer* SrcBuff)
+{
+	SrcBuff->Append("\t}\n");
+	PS->EndScope();
+	PS->CurrentIfStmtDepth--;
+}
+
+void GenerateFunctionBody(ProgramState* PS, SourceBuffer* SrcBuff, int32 NumStatements)
+{
 	for (int32 i = 0; i < NumStatements; i++)
 	{
-		GenerateStatement(PS, SrcBuff);
+		float Decider = PS->GetFloat01();
+
+		if (Decider < 0.1f)
+		{
+			GenerateBeginIfStatement(PS, SrcBuff);
+		}
+		else if (Decider < 0.2f && PS->CurrentIfStmtDepth > 0)
+		{
+			GenerateEndIfStatement(PS, SrcBuff);
+		}
+		else
+		{
+			GenerateStatement(PS, SrcBuff);
+		}
+	}
+
+	while (PS->CurrentIfStmtDepth > 0)
+	{
+		GenerateEndIfStatement(PS, SrcBuff);
 	}
 }
 
@@ -834,13 +887,15 @@ void GenerateUserDefinedFuncs(ProgramState* PS, SourceBuffer* SrcBuff)
 		}
 		SrcBuff->AppendFormat(") {\n");
 
-		GenerateFunctionBody(PS, SrcBuff);
+		int32 NumStatements = PS->GetIntInRange(1, 10);
+		GenerateFunctionBody(PS, SrcBuff, NumStatements);
 
 		GenerateReturnStatement(PS, SrcBuff, RetType);
 
 		SrcBuff->AppendFormat("}\n\n");
 
 		PS->EndScope();
+		assert(PS->VarScopeCountStack.size() == 0);
 	}
 }
 
@@ -850,7 +905,8 @@ void GenerateMainFunction(ProgramState* PS, SourceBuffer* SrcBuff)
 
 	SrcBuff->Append("void main() {\n");
 
-	GenerateFunctionBody(PS, SrcBuff);
+	int32 NumStatements = PS->GetIntInRange(5, 25);
+	GenerateFunctionBody(PS, SrcBuff, NumStatements);
 
 	// TODO: Non-Frag shaders
 	VariableInfo FragColourInfo;
@@ -861,6 +917,7 @@ void GenerateMainFunction(ProgramState* PS, SourceBuffer* SrcBuff)
 	SrcBuff->Append("}\n\n");
 
 	PS->EndScope();
+	assert(PS->VarScopeCountStack.size() == 0);
 }
 
 void GenerateShaderSource(ProgramState* PS, SourceBuffer* SrcBuff, ShaderType InShaderType)
@@ -889,19 +946,25 @@ void GenerateShaderSource(ProgramState* PS, SourceBuffer* SrcBuff, ShaderType In
 
 int main(int argc, char** argv)
 {
-	printf("Sup.\n");
-
-	ProgramState PS;
-	PS.SetSeed(0x112);
-
 	// Heap allocation just cause it's pretty big
 	// Also: typedef as ctor name isn't portable afaik
 	SourceBuffer* SrcBuff = new StringStackBuffer<MAX_SHADER_SOURCE_LEN>;
-	GenerateShaderSource(&PS, SrcBuff, ShaderType::Frag);
 
-	OutputDebugStringA("-----------\n");
-	OutputDebugStringA(SrcBuff->buffer);
-	OutputDebugStringA("\n-----------\n");
+	for (int32 i = 0; i < 1024; i++)
+	{
+		ProgramState PS;
+		PS.SetSeed(0x112);
+
+		// TODO: Make this a Reset/Clear method
+		SrcBuff->buffer[0] = '\0';
+		SrcBuff->length = 0;
+
+		GenerateShaderSource(&PS, SrcBuff, ShaderType::Frag);
+
+		OutputDebugStringA("-----------\n");
+		OutputDebugStringA(SrcBuff->buffer);
+		OutputDebugStringA("\n-----------\n");
+	}
 
 	delete SrcBuff;
 
