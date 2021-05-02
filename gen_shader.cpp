@@ -13,8 +13,7 @@ struct StringStackBuffer{
 	char buffer[capacity];
 	
 	StringStackBuffer(){
-		buffer[0] = '\0';
-		length = 0;
+		Clear();
 	}
 	
 	StringStackBuffer(const char* format, ...){
@@ -30,6 +29,11 @@ struct StringStackBuffer{
 		va_end(varArgs);
 	}
 	
+	void Clear() {
+		buffer[0] = '\0';
+		length = 0;
+	}
+
 	void Append(const char* str){
 		length += snprintf(&buffer[length], capacity - length, "%s", str);
 		if (length >= capacity - 1)
@@ -123,26 +127,11 @@ struct DataTransformation
 	StringStackBuffer<32> Name;
 };
 
-// Each expression writes out a basic stack bytecode,
-// which consists of variable accesses and data transformations (both by id/index)
-// this is because we might get partways through generating an expression and decide the types don't work out,
-// and so in that case we discard it
-//struct ExpressionStackBytecodeOp
-//{
-//	enum Type_t {
-//		Transform,
-//		VarAccess
-//	} Type;
-//
-//	int32 Index;
-//};
-
 struct ProgramState
 {
 	std::vector<TypeInfo> ProgramTypes;
 	std::vector<DataTransformation> DataTransforms;
 	
-	// TODO: Index DataTransforms by DstType, and make it easy to select a random one of those if it exists
 	std::vector<std::pair<int32, int32>> DataTransformIndexByDstType;
 	
 	std::vector<VariableInfo> VarsInScope;
@@ -152,7 +141,7 @@ struct ProgramState
 
 	int32 CurrentIfStmtDepth = 0;
 	
-	// TODO: For vert shaders
+	// TODO: For vert shaders, and more generally Vulkan-style shaders
 	//std::vector<VariableInfo> OutVars;
 	
 	std::mt19937_64 RNGState;
@@ -393,8 +382,7 @@ void InitProgramState(ProgramState* PS)
 
 void GenerateUserDefinedStructs(ProgramState* PS, SourceBuffer* SrcBuff)
 {
-	// TODO: Should be 0 after testing
-	int32 NumStructs = PS->GetIntInRange(2, 5);
+	int32 NumStructs = PS->GetIntInRange(0, 5);
 
 	for (int32 i = 0; i < NumStructs; i++)
 	{
@@ -575,7 +563,6 @@ void GenerateLiteralExpression(ProgramState* PS, TypeID DstType)
 	}
 }
 
-// TODO: How to deal with knowing which variables, and which fields have been init'd
 bool GenerateExpression(ProgramState* PS, TypeID DstType, int ExprStackDepth = 0, bool bForceNoRecur = false)
 {
 	const float Decider = PS->GetFloat01();
@@ -587,15 +574,18 @@ bool GenerateExpression(ProgramState* PS, TypeID DstType, int ExprStackDepth = 0
 		// If it doesn't exist and it's a builtin type, issue a literal
 		// If we don't have a variable and it's not a builtin type, bail out
 
-		// TODO: Also index variables by type?
-		int32 SearchStartOffset = PS->GetIntInRange(0, PS->VarsInScope.size() - 1);
-		for (int32 i = 0; i < PS->VarsInScope.size(); i++)
+		if (PS->VarsInScope.size() > 0)
 		{
-			const auto& VarInfo = PS->VarsInScope[(SearchStartOffset + i) % PS->VarsInScope.size()];
-			if (VarInfo.Type == DstType)
+			// TODO: Also index variables by type?
+			int32 SearchStartOffset = PS->GetIntInRange(0, PS->VarsInScope.size() - 1);
+			for (int32 i = 0; i < PS->VarsInScope.size(); i++)
 			{
-				PS->ScratchExpressionList.push_back(VarInfo.Name);
-				return true;
+				const auto& VarInfo = PS->VarsInScope[(SearchStartOffset + i) % PS->VarsInScope.size()];
+				if (VarInfo.Type == DstType)
+				{
+					PS->ScratchExpressionList.push_back(VarInfo.Name);
+					return true;
+				}
 			}
 		}
 
@@ -712,7 +702,7 @@ void GenerateAssignmentStatement(ProgramState* PS, SourceBuffer* SrcBuff, const 
 {
 	bool Success = false;
 
-	const int32 NumRetries = 4;
+	const int32 NumRetries = 2;
 	for (int32 i = 0; i < NumRetries; i++)
 	{
 		// If it's our last chance to produce a builtin, force it to not recur so we know we'll get something
@@ -784,7 +774,7 @@ void GenerateBeginIfStatement(ProgramState* PS, SourceBuffer* SrcBuff)
 	SrcBuff->Append("\tif (");
 	
 	bool Success = false;
-	const int32 NumRetries = 4;
+	const int32 NumRetries = 2;
 	for (int32 i = 0; i < NumRetries; i++)
 	{
 		// If it's our last chance to produce a builtin, force it to not recur so we know we'll get something
@@ -854,11 +844,7 @@ void GenerateReturnStatement(ProgramState* PS, SourceBuffer* SrcBuff, TypeID Ret
 
 void GenerateUserDefinedFuncs(ProgramState* PS, SourceBuffer* SrcBuff)
 {
-	// TODO: Remember to add the data transformation as well
-	// and IndexProgramDataTransformations()
-
-	// TODO: Should be 0 after testing
-	int32 NumUserFuncs = PS->GetIntInRange(3, 5);
+	int32 NumUserFuncs = PS->GetIntInRange(0, 5);
 	for (int32 i = 0; i < NumUserFuncs; i++)
 	{
 		PS->BeginScope();
@@ -869,6 +855,11 @@ void GenerateUserDefinedFuncs(ProgramState* PS, SourceBuffer* SrcBuff)
 		int32 NumParams = PS->GetIntInRange(1, 4);
 
 		SrcBuff->AppendFormat("%s user_func_%d(", RetTypeInfo.Name.buffer, i);
+
+		DataTransformation Transform;
+		Transform.TransformType = DTT_Func;
+		Transform.Name.AppendFormat("user_func_%d", i);
+		Transform.DstType = RetType;
 
 		for (int32 p = 0; p < NumParams; p++)
 		{
@@ -884,6 +875,9 @@ void GenerateUserDefinedFuncs(ProgramState* PS, SourceBuffer* SrcBuff)
 			ParamVarInfo.Type = ParamType;
 			ParamVarInfo.Name.AppendFormat("param_%d", p);
 			PS->VarsInScope.push_back(ParamVarInfo);
+
+			Transform.SrcTypes[Transform.NumSrcTypes] = ParamType;
+			Transform.NumSrcTypes++;
 		}
 		SrcBuff->AppendFormat(") {\n");
 
@@ -896,6 +890,11 @@ void GenerateUserDefinedFuncs(ProgramState* PS, SourceBuffer* SrcBuff)
 
 		PS->EndScope();
 		assert(PS->VarScopeCountStack.size() == 0);
+
+		PS->DataTransforms.push_back(Transform);
+		// NOTE: We have to re-index them here instead of batching after all user-defined functions,
+		// because we might want to call functions in subsequent functions
+		IndexProgramDataTransformations(PS);
 	}
 }
 
@@ -953,11 +952,9 @@ int main(int argc, char** argv)
 	for (int32 i = 0; i < 1024; i++)
 	{
 		ProgramState PS;
-		PS.SetSeed(0x112);
+		PS.SetSeed(i);
 
-		// TODO: Make this a Reset/Clear method
-		SrcBuff->buffer[0] = '\0';
-		SrcBuff->length = 0;
+		SrcBuff->Clear();
 
 		GenerateShaderSource(&PS, SrcBuff, ShaderType::Frag);
 
