@@ -6,6 +6,7 @@
 #include <assert.h>
 
 #include <random>
+#include <algorithm>
 
 template<int capacity>
 struct StringStackBuffer{
@@ -458,11 +459,13 @@ void GenerateGlobalVariables(ProgramState* PS, SourceBuffer* SrcBuff, ShaderType
 {
 	int32 NumAttributes = 0;
 	int32 NumVarying = 0;
+	int32 NumIn = 0;
 	int32 NumUniforms = 0;
 	if (InShaderType == ShaderType::Frag)
 	{
 		// Generate varying, uniform, not attribute
 		NumVarying = PS->GetIntInRange(0, 5);
+		NumIn = PS->GetIntInRange(0, 5);
 		NumUniforms = PS->GetIntInRange(0, 5);
 	}
 	else
@@ -488,13 +491,14 @@ void GenerateGlobalVariables(ProgramState* PS, SourceBuffer* SrcBuff, ShaderType
 				}
 			}
 
-			Var.Name.AppendFormat("glob_%4s_%d", DeclType, i);
+			Var.Name.AppendFormat("glob_%s_%d", DeclType, i);
 			SrcBuff->AppendFormat("%s %s %s;\n", DeclType, PS->ProgramTypes[Var.Type].Name.buffer, Var.Name.buffer);
 		}
 	};
 	
 	DeclareNumGlobalVars("attribute", NumAttributes, false);
 	DeclareNumGlobalVars("varying", NumVarying, false);
+	DeclareNumGlobalVars("in", NumIn, false);
 	DeclareNumGlobalVars("uniform", NumUniforms, true);
 }
 
@@ -518,7 +522,16 @@ void GenerateLiteralExpression(ProgramState* PS, TypeID DstType)
 		}
 	} break;
 	case BT_Float: {
-		PS->ScratchExpressionList.push_back(StringStackBuffer<32>("%f", PS->GetFloatInRange(-2.0f, 2.0f)));
+		float LitValue = PS->GetFloatInRange(-2.0f, 2.0f);
+		if (LitValue <= 0.0f)
+		{
+			// Same as above: add a space to avoid "--" forming
+			PS->ScratchExpressionList.push_back(StringStackBuffer<32>(" %f", LitValue));
+		}
+		else
+		{
+			PS->ScratchExpressionList.push_back(StringStackBuffer<32>("%f", LitValue));
+		}
 	} break;
 	case BT_Vec2:
 	{
@@ -919,13 +932,26 @@ void GenerateMainFunction(ProgramState* PS, SourceBuffer* SrcBuff)
 	assert(PS->VarScopeCountStack.size() == 0);
 }
 
+#define ARRAY_COUNTOF(arr) (sizeof(arr) / sizeof((arr)[0]))
+
+void GenerateShaderSourceHeader(ProgramState* PS, SourceBuffer* SrcBuff)
+{
+	const int32 Versions[] = { 130, 300, 330, 400, 410, 430 };
+	const int32 Version = Versions[PS->GetIntInRange(0, ARRAY_COUNTOF(Versions) - 1)];
+
+	const char* Precisions[] = { "lowp", "mediump", "highp" };
+	const char* Precision = Precisions[PS->GetIntInRange(0, ARRAY_COUNTOF(Precisions) - 1)];
+
+	SrcBuff->AppendFormat("#version %d\n\n", Version);
+	SrcBuff->AppendFormat("precision %s float;\n\n", Precision);
+}
+
 void GenerateShaderSource(ProgramState* PS, SourceBuffer* SrcBuff, ShaderType InShaderType)
 {
 	// TODO: Init program outside generation loop once, and restore to it?
 	InitProgramState(PS);
-
-	// TODO: Diff. precision levels
-	SrcBuff->Append("precision highp float;\n\n");
+	
+	GenerateShaderSourceHeader(PS, SrcBuff);
 
 	GenerateUserDefinedStructs(PS, SrcBuff);
 	IndexProgramDataTransformations(PS);
@@ -939,9 +965,9 @@ void GenerateShaderSource(ProgramState* PS, SourceBuffer* SrcBuff, ShaderType In
 
 
 
-
+#if defined(_WIN32)
 #include <Windows.h>
-
+#endif
 
 int main(int argc, char** argv)
 {
@@ -949,7 +975,7 @@ int main(int argc, char** argv)
 	// Also: typedef as ctor name isn't portable afaik
 	SourceBuffer* SrcBuff = new StringStackBuffer<MAX_SHADER_SOURCE_LEN>;
 
-	for (int32 i = 0; i < 1024; i++)
+	for (int32 i = 0; i < 16*1024; i++)
 	{
 		ProgramState PS;
 		PS.SetSeed(i);
@@ -958,9 +984,15 @@ int main(int argc, char** argv)
 
 		GenerateShaderSource(&PS, SrcBuff, ShaderType::Frag);
 
+		FILE* f = fopen(StringStackBuffer<256>("gen_shaders/%06d.frag", i).buffer, "w");
+		fprintf(f, "%s", SrcBuff->buffer);
+		fclose(f);
+
+#if defined(_WIN32)
 		OutputDebugStringA("-----------\n");
 		OutputDebugStringA(SrcBuff->buffer);
 		OutputDebugStringA("\n-----------\n");
+#endif
 	}
 
 	delete SrcBuff;
