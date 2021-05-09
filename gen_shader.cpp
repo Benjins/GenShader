@@ -1,3 +1,8 @@
+
+#if defined(_WIN32)
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -8,52 +13,7 @@
 #include <random>
 #include <algorithm>
 
-template<int capacity>
-struct StringStackBuffer{
-	int length;
-	char buffer[capacity];
-	
-	StringStackBuffer(){
-		Clear();
-	}
-	
-	StringStackBuffer(const char* format, ...){
-		buffer[0] = '\0';
-		length = 0;
-		va_list varArgs;
-		va_start(varArgs, format);
-		length += vsnprintf(buffer, capacity, format, varArgs);
-		if (length >= capacity - 1)
-		{
-			length = capacity - 1;
-		}
-		va_end(varArgs);
-	}
-	
-	void Clear() {
-		buffer[0] = '\0';
-		length = 0;
-	}
-
-	void Append(const char* str){
-		length += snprintf(&buffer[length], capacity - length, "%s", str);
-		if (length >= capacity - 1)
-		{
-			length = capacity - 1;
-		}
-	}
-	
-	void AppendFormat(const char* format, ...){
-		va_list varArgs;
-		va_start(varArgs, format);
-		length += vsnprintf(&buffer[length], capacity - length, format, varArgs);
-		va_end(varArgs);
-		if (length >= capacity - 1)
-		{
-			length = capacity - 1;
-		}
-	}
-};
+#include "stack_string.h"
 
 
 #define MAX_SHADER_SOURCE_LEN (128*1024)
@@ -975,7 +935,7 @@ int main(int argc, char** argv)
 	// Also: typedef as ctor name isn't portable afaik
 	SourceBuffer* SrcBuff = new StringStackBuffer<MAX_SHADER_SOURCE_LEN>;
 
-	for (int32 i = 0; i < 16*1024; i++)
+	for (int32 i = 0; i < 1024; i++)
 	{
 		ProgramState PS;
 		PS.SetSeed(i);
